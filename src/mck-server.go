@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,25 +19,80 @@ import (
 
 const inputDirName = "inputs"
 const doneDirName = "done"
-const maxCount = 1000
+const resultDirName = "results"
+const maxCount = 30
 
 var basePath string
+var mckName string
 
 type server struct {
-	InputFile string
-	Count     int
+	InputFileName string
+	InputFile     string
+	Count         int32
+	MCKName       string
 }
 
 func (s *server) FetchJobs(ctx context.Context, request *pb.JobRequest) (*pb.Job, error) {
-	fmt.Println("FetchJobs request is accepted.")
-	if s.InputFile == "" {
-		s.InputFile = findInputFile()
+	fmt.Println("FetchJobs is called.")
+	if s.InputFile == "" || s.Count >= maxCount {
+		var err error
+		if s.InputFile != "" {
+			moveToDone(s.InputFileName)
+		}
+		s.InputFile, err = findInputFile()
+		if err != nil {
+			return nil, err
+		}
+		s.InputFileName = filepath.Base(s.InputFile)
+		s.Count = 0
 	}
-	return &pb.Job{"job_name", []byte(""), 3, ""}, nil
+
+	rest := maxCount - s.Count
+	count := request.NumRequest
+	if rest < request.NumRequest {
+		count = rest
+	}
+	s.Count += count
+
+	inputFileData, err := ioutil.ReadFile(s.InputFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.Job{s.InputFileName, inputFileData, count, mckName}, nil
 }
 
 func (s *server) DownloadMCK(ctx context.Context, request *pb.MCKRequest) (*pb.MolComKit, error) {
-	return &pb.MolComKit{[]byte("hoge")}, nil
+	fmt.Println("downloadMCK is called.")
+	mck, err := ioutil.ReadFile(request.Name)
+	log.Printf("read file: %v", request.Name)
+	if err != nil {
+		return nil, errors.New("could not find the specified molcomkit")
+	}
+	return &pb.MolComKit{mck}, nil
+}
+
+func (s *server) SendResult(ctx context.Context, result *pb.JobResult) (*pb.Empty, error) {
+	_, err := os.Stat(resultDirName)
+	if err != nil {
+		os.Mkdir(resultDirName, 0644)
+	}
+	resultFile := filepath.Join(resultDirName, result.Name)
+	var fp *os.File
+	fp, err = os.OpenFile(resultFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer fp.Close()
+
+	writer := bufio.NewWriter(fp)
+	_, err = writer.WriteString(result.Result)
+	if err != nil {
+		return nil, err
+	}
+	writer.Flush()
+
+	return &pb.Empty{}, nil
 }
 
 func newServer() *server {
@@ -45,6 +103,7 @@ func newServer() *server {
 }
 
 func main() {
+	flag.Parse()
 	inputFile, err := findInputFile()
 	if err != nil {
 		fmt.Println(err)
@@ -65,32 +124,35 @@ func main() {
 }
 
 func init() {
-	var err error
-	basePath, err = os.Getwd()
-	if err != nil {
-		// return errors.New("absolute path couldn't be gotten")
-	}
+	flag.StringVar(&mckName, "name", "MolComKit_v2.4.3", "specify the name of MolComKit")
 }
 
 func findInputFile() (string, error) {
 	// inputDir := filepath.Join(basePath, inputDirName)
 	_, err := os.Stat(inputDirName)
 	if err != nil {
-		return "", errors.New("input directory doesn't exist")
+		return "", err
 	}
 
 	fileInfos, err := ioutil.ReadDir(inputDirName)
 	if err != nil {
-		return "", errors.New("couldn't read inputs directory")
+		return "", err
 	}
 	for _, fileInfo := range fileInfos {
+		if filepath.Ext(fileInfo.Name()) != ".txt" {
+			continue
+		}
 		return filepath.Join(inputDirName, fileInfo.Name()), nil
 	}
 
-	return "", errors.New("couldn't read inputs directory")
+	return "", errors.New("inputs directory is empty")
 }
 
-func moveFile(filePath, toDir string) error {
+func moveToDone(fileName string) error {
+	err := os.Rename(filepath.Join(inputDirName, fileName), filepath.Join(doneDirName, fileName))
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
